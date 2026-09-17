@@ -2,18 +2,17 @@
 """Merge 6 camera videos into a 2x3 grid using ffmpeg, with time sync.
 
 Layout (2 rows x 3 columns):
-  Row 1: robot_front(1)    launcher_front(2)   rotor(3)
-  Row 2: stator(4)         launcher_L(5)       launcher_R(6)
+  Row 1: rotor(1)           robot_front(2)      stator(3)
+  Row 2: launcher_L(4)      launcher_front(5)   launcher_R(6)
 
-Videos are synced by their filename timestamps: cameras that started
-recording later are delayed with black frames so all frames represent
-the same wall-clock time. Missing cameras get full black frames.
-Shorter videos are padded with black at the end.
+Videos are synced by filename timestamps. Cameras that started later
+get black frames prepended so all frames represent the same wall-clock
+time. Missing cameras get full black. Shorter videos are padded at end.
+Output ends when the last camera finishes.
 
 Usage:
-  uv run merge_grid.py -g 0 -o output.mp4            # merge time group 0
-  uv run merge_grid.py -g 0 -o out.mp4 --duration 10 # only first 10s (test)
-  uv run merge_grid.py v1.mp4 v2.mp4 ... -o out.mp4  # explicit files (camera order)
+  uv run merge_grid.py -g 10 -o output.mp4            # merge time group 10
+  uv run merge_grid.py -g 10 -o out.mp4 --duration 10 # only first 10s
 """
 
 import argparse
