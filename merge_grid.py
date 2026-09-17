@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Merge 6 camera videos into a 2x3 grid using ffmpeg.
+"""Merge 6 camera videos into a 2x3 grid using ffmpeg, with time sync.
 
 Layout (2 rows x 3 columns):
   Row 1: robot_front(1)    launcher_front(2)   rotor(3)
   Row 2: stator(4)         launcher_L(5)       launcher_R(6)
 
-Missing cameras are replaced with black frames. Shorter videos are
-padded with black frames to match the longest video's duration.
+Videos are synced by their filename timestamps: cameras that started
+recording later are delayed with black frames so all frames represent
+the same wall-clock time. Missing cameras get full black frames.
+Shorter videos are padded with black at the end.
 
 Usage:
   uv run merge_grid.py -g 0 -o output.mp4            # merge time group 0
@@ -18,6 +20,9 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
+from datetime import datetime
+
+from group_similar_videos import parse_timestamp
 
 CAMERA_ORDER = [
     "camera_robot_front",
@@ -56,7 +61,7 @@ def probe_duration(path: Path) -> float:
     return float(result.stdout.strip())
 
 
-def find_group_videos(root: Path, group_index: int) -> dict[str, Path]:
+def find_group_videos(root: Path, group_index: int) -> dict[str, tuple[Path, datetime]]:
     from group_similar_videos import find_videos, group_similar
 
     videos = find_videos(root)
@@ -65,56 +70,86 @@ def find_group_videos(root: Path, group_index: int) -> dict[str, Path]:
         sys.exit(f"Group {group_index} not found (only {len(groups)} groups)")
 
     slots = {}
-    for path, _ in groups[group_index]:
+    for path, ts in groups[group_index]:
         for cam in CAMERA_ORDER:
             if cam in str(path):
-                slots[cam] = path
+                slots[cam] = (path, ts)
     return slots
 
 
 def merge_grid(
-    slots: dict[str, Path | None],
-    durations: dict[str, float],
+    slots: dict[str, tuple[Path, datetime] | None],
     output: Path,
-    max_duration: float,
     limit: float | None,
 ):
     n = len(CAMERA_ORDER)
+
+    timestamps = {}
+    durations = {}
+    for cam in CAMERA_ORDER:
+        entry = slots.get(cam)
+        if entry is not None:
+            path, ts = entry
+            timestamps[cam] = ts
+            durations[cam] = probe_duration(path)
+
+    if not durations:
+        sys.exit("No valid input videos.")
+
+    ref_ts = min(timestamps.values())
+    delays = {cam: (timestamps[cam] - ref_ts).total_seconds() for cam in timestamps}
+    ends = {cam: delays[cam] + durations[cam] for cam in durations}
+    total_duration = max(ends.values())
+
+    print(f"  {'camera':25s} {'delay':>7s} {'duration':>9s} {'end':>7s}")
+    for cam in CAMERA_ORDER:
+        entry = slots.get(cam)
+        if entry is None:
+            print(f"  {cam:25s} {'--':>7s} {'--':>9s} {'--':>7s}  MISSING")
+        else:
+            print(
+                f"  {cam:25s} {delays[cam]:6.1f}s {durations[cam]:8.1f}s"
+                f" {ends[cam]:6.1f}s  {entry[0].name}"
+            )
+    print(f"  total duration: {total_duration:.1f}s")
+
     cmd = ["ffmpeg", "-y"]
     filter_parts = []
     labels = []
 
     for i, cam in enumerate(CAMERA_ORDER):
-        path = slots.get(cam)
-        if path is None:
+        entry = slots.get(cam)
+        if entry is None:
             cmd += [
                 "-f",
                 "lavfi",
                 "-i",
-                f"color=c=black:s={WIDTH}x{HEIGHT}:r={FPS}:d={max_duration:.3f}",
+                f"color=c=black:s={WIDTH}x{HEIGHT}:r={FPS}:d={total_duration:.3f}",
             ]
-            pad_sec = 0.0
         else:
-            cmd += ["-i", str(path)]
-            pad_sec = max(0.0, max_duration - durations[cam])
+            cmd += ["-i", str(entry[0])]
 
-        filter_parts.append(
+        delay = delays.get(cam, 0.0)
+        tail_pad = max(0.0, total_duration - ends.get(cam, 0.0))
+
+        parts = (
             f"[{i}:v]fps={FPS},"
             f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
             f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:black"
-            + (
-                f",tpad=stop=-1:stop_mode=add:color=black:stop_duration={pad_sec:.3f}"
-                if pad_sec > 0
-                else ""
-            )
-            + f"[v{i}]"
         )
+        if delay > 0:
+            parts += f",tpad=start_duration={delay:.3f}:start_mode=add:color=black"
+        if tail_pad > 0:
+            parts += f",tpad=stop_duration={tail_pad:.3f}:stop_mode=add:color=black"
+        parts += f"[v{i}]"
+
+        filter_parts.append(parts)
         labels.append(f"[v{i}]")
 
     layout = "|".join(f"{(i % COLS) * WIDTH}_{(i // COLS) * HEIGHT}" for i in range(n))
     filter_parts.append(f"{''.join(labels)}xstack=inputs={n}:layout={layout}[out]")
 
-    effective_duration = limit if limit is not None else max_duration
+    effective_duration = limit if limit is not None else total_duration
     cmd += [
         "-filter_complex",
         ";".join(filter_parts),
@@ -138,7 +173,7 @@ def merge_grid(
     cmd.append(str(output))
 
     print(
-        f"Output: {output} ({WIDTH * COLS}x{HEIGHT * ROWS}, duration {max_duration:.1f}s)"
+        f"Output: {output} ({WIDTH * COLS}x{HEIGHT * ROWS}, {effective_duration:.1f}s)"
     )
     result = subprocess.run(cmd)
     if result.returncode != 0:
@@ -164,32 +199,22 @@ def main():
 
     if args.group is not None:
         found = find_group_videos(root, args.group)
-        slots = {cam: found.get(cam) for cam in CAMERA_ORDER}
+        slots: dict[str, tuple[Path, datetime] | None] = {
+            cam: found.get(cam) for cam in CAMERA_ORDER
+        }
     elif len(args.inputs) == len(CAMERA_ORDER):
-        slots = dict(zip(CAMERA_ORDER, args.inputs))
+        slots = {}
+        for cam, path in zip(CAMERA_ORDER, args.inputs):
+            ts = parse_timestamp(path.name)
+            if ts is None:
+                parser.error(f"Cannot parse timestamp from {path.name}")
+            slots[cam] = (path, ts)
     else:
         parser.error(
             f"Provide exactly {len(CAMERA_ORDER)} input files, or use -g GROUP"
         )
 
-    durations = {}
-    for cam in CAMERA_ORDER:
-        path = slots[cam]
-        if path is None:
-            print(f"  {cam:25s} MISSING -> black frame")
-        else:
-            durations[cam] = probe_duration(path)
-            print(f"  {cam:25s} {path.name}  ({durations[cam]:.1f}s)")
-
-    max_duration = max(durations.values()) if durations else 0.0
-    if max_duration <= 0:
-        sys.exit("No valid input videos.")
-
-    for cam in CAMERA_ORDER:
-        if cam in durations and durations[cam] < max_duration:
-            print(f"  pad {cam}: +{max_duration - durations[cam]:.1f}s black")
-
-    merge_grid(slots, durations, args.output, max_duration, args.duration)
+    merge_grid(slots, args.output, args.duration)
 
 
 if __name__ == "__main__":
