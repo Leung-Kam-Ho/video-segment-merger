@@ -25,11 +25,11 @@ from datetime import datetime
 from group_similar_videos import parse_timestamp
 
 CAMERA_ORDER = [
-    "camera_robot_front",
-    "camera_launcher_front",
     "camera_rotor",
+    "camera_robot_front",
     "camera_stator",
     "camera_launcher_L",
+    "camera_launcher_front",
     "camera_launcher_R",
 ]
 
@@ -81,6 +81,7 @@ def merge_grid(
     slots: dict[str, tuple[Path, datetime] | None],
     output: Path,
     limit: float | None,
+    no_sync: bool = False,
 ):
     n = len(CAMERA_ORDER)
 
@@ -96,8 +97,12 @@ def merge_grid(
     if not durations:
         sys.exit("No valid input videos.")
 
-    ref_ts = min(timestamps.values())
-    delays = {cam: (timestamps[cam] - ref_ts).total_seconds() for cam in timestamps}
+    if no_sync:
+        delays = {cam: 0.0 for cam in timestamps}
+    else:
+        ref_ts = min(timestamps.values())
+        delays = {cam: (timestamps[cam] - ref_ts).total_seconds() for cam in timestamps}
+
     ends = {cam: delays[cam] + durations[cam] for cam in durations}
     total_duration = max(ends.values())
 
@@ -193,6 +198,11 @@ def main():
     parser.add_argument(
         "--duration", type=float, default=None, help="Limit output duration (seconds)"
     )
+    parser.add_argument(
+        "--no-sync",
+        action="store_true",
+        help="Align all videos at t=0 (ignore filename timestamps)",
+    )
     args = parser.parse_args()
 
     root = Path(__file__).parent
@@ -214,7 +224,7 @@ def main():
             f"Provide exactly {len(CAMERA_ORDER)} input files, or use -g GROUP"
         )
 
-    merge_grid(slots, args.output, args.duration)
+    merge_grid(slots, args.output, args.duration, args.no_sync)
 
 
 if __name__ == "__main__":
