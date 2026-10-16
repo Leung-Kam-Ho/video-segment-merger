@@ -140,6 +140,10 @@ Real-time versions from `extent.py` (`<camera>_5min/`) are used automatically
 for the front cameras when available — otherwise the sped-up originals are
 used and a warning is printed.
 
+Anything inside the `exclude/` folder is ignored: move a camera folder (or
+individual videos) there to leave them out of the grids. When a camera only
+exists as `<camera>_5min/`, that folder is used directly.
+
 ```bash
 uv run sync_grid.py --list          # show the detected sessions
 uv run sync_grid.py                 # render every session into grids/
@@ -163,3 +167,37 @@ resumable.
 | `--min-cameras` | Skip sessions with fewer cameras (default: `2`) |
 | `-j`, `--jobs` | Render N sessions in parallel (default: `1`) |
 | `--crf` / `--preset` | x264 quality/speed (default: `22` / `fast`) |
+
+### 6. `merge_with_gaps.py` — Merge a folder into one timeline-accurate video
+
+Rebuilds the real wall-clock timeline of a single folder. Segments are named
+after their start time, so the script knows exactly when each one began and
+ended; any hole between two segments (camera stopped early, a window is
+missing, or a file is corrupt) is filled with a black placeholder of exactly
+the missing duration.
+
+```bash
+uv run merge_with_gaps.py camera_launcher_L              # -> camera_launcher_L/merged.mp4
+uv run merge_with_gaps.py camera_launcher_L --dry-run    # list files and gaps only
+uv run merge_with_gaps.py camera_launcher_L --duration 20 -o test.mp4   # 20 s test render
+uv run merge_with_gaps.py camera_launcher_L -o out.mp4 --reencode   # H.264 fallback
+```
+
+What it does:
+
+1. Skips `._*` junk and sorts the segments by the `YYYYMMDD_HHMMSS` in the name.
+2. Probes each file; corrupt/unreadable segments (e.g. truncated recordings
+   without a `moov` atom) are skipped and reported.
+3. Checks that all segments share codec, resolution, frame rate and time base,
+   then generates one black clip per gap (matching those parameters) and
+   concatenates everything with the concat demuxer using **stream copy**.
+4. Verifies the output duration against the expected timeline and writes
+   `merge_report.txt` next to the output.
+
+| Option | Description |
+|--------|-------------|
+| `-o`, `--output` | Output file (default: `<folder>/merged.mp4`) |
+| `--dry-run` | Print the plan (files, gaps, duration) and exit |
+| `--duration` | Only build the first N seconds (`--duration 20` for a quick test) |
+| `--reencode` | Re-encode to H.264 instead of stream copy (slower, safest) |
+| `--force` | Overwrite an existing output |
